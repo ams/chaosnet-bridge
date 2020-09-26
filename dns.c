@@ -71,7 +71,7 @@ static int chreq_rix = 0;			/* read index */
 // not thread safe: extern int h_errno;
 
 static void dns_describe_packet(u_char *pkt, int len);
-static void init_chaos_dns_state(res_state statp);
+static void init_chaos_dns_state(void);
 
 // called by handle_rfc for an RFC to the "DNS" contact
 void
@@ -221,13 +221,12 @@ dns_forwarder_thread(void *v)
 {
   // resolver state, local to each thread
   struct __res_state chres;
-  res_state statp = &chres;
   u_char answer[NS_PACKETSZ*4];	/* fit ridiculous amounts to avoid ns_initparse breaking */
   int anslen;
   u_char ans[CH_PK_MAXLEN];	/* incl header+trailer */
   struct chaos_header *ap = (struct chaos_header *)&ans;
 
-  init_chaos_dns_state(statp);
+  init_chaos_dns_state();
 
   while (1) {
     // wait for someting to do
@@ -252,7 +251,7 @@ dns_forwarder_thread(void *v)
     }
 
     // forward the query
-    if ((anslen = res_nsend(statp, q->req, q->reqlen, (u_char *)&answer, sizeof(answer))) >= 0) {
+    if ((anslen = res_send(q->req, q->reqlen, (u_char *)&answer, sizeof(answer))) >= 0) {
       // success, free the RFC buffer
       free(q->req);
       q->req = NULL;
@@ -308,7 +307,7 @@ dns_forwarder_thread(void *v)
 
     } else {
       // query failed @@@@ maybe send LOS?
-      if (trace_dns) fprintf(stderr,"DNS: query failed, error code %d\n", statp->res_h_errno);
+      if (trace_dns) fprintf(stderr,"DNS: query failed, error code %d\n", _res->res_h_errno);
       PTUNLOCK(dns_lock);
     }
     // tell responder there is room for one more
@@ -325,7 +324,6 @@ dns_name_of_addr(u_short chaddr, u_char *namestr, int namestr_len)
 {
   // resolver state, local to each thread
   struct __res_state chres;
-  res_state statp = &chres;
   char qstring[12+6];
   u_char answer[NS_PACKETSZ];
   int anslen;
@@ -333,13 +331,13 @@ dns_name_of_addr(u_short chaddr, u_char *namestr, int namestr_len)
   ns_rr rr;
   int i, offs;
 
-  init_chaos_dns_state(statp);
+  init_chaos_dns_state();
 
   // note that chaos_address_domain should NOT end with dot.
   sprintf(qstring,"%o.%s.", chaddr, chaos_address_domain);
 
-  if ((anslen = res_nquery(statp, qstring, ns_c_chaos, ns_t_ptr, (u_char *)&answer, sizeof(answer))) < 0) {
-    if (trace_dns) fprintf(stderr,"DNS: PTR of %s failed, errcode %d: %s\n", qstring, statp->res_h_errno, hstrerror(statp->res_h_errno));
+  if ((anslen = res_query(qstring, ns_c_chaos, ns_t_ptr, (u_char *)&answer, sizeof(answer))) < 0) {
+    if (trace_dns) fprintf(stderr,"DNS: PTR of %s failed, errcode %d: %s\n", qstring, _res->res_h_errno, hstrerror(_res->res_h_errno));
     *namestr = '\0';
     return -1;
   }
@@ -350,7 +348,7 @@ dns_name_of_addr(u_short chaddr, u_char *namestr, int namestr_len)
   }
 
   if (ns_initparse((u_char *)&answer, anslen, &m) < 0) {
-    fprintf(stderr,"ns_init_parse failure code %d", statp->res_h_errno);
+    fprintf(stderr,"ns_init_parse failure code %d", _res->res_h_errno);
     return -1;
   }
 
@@ -392,7 +390,6 @@ dns_addrs_of_name(u_char *namestr, u_short *addrs, int addrs_len)
 {
   // resolver state, local to each thread
   struct __res_state chres;
-  res_state statp = &chres;
   char a_dom[NS_MAXDNAME];
   int a_addr;
   char qstring[NS_MAXDNAME];
@@ -402,13 +399,13 @@ dns_addrs_of_name(u_char *namestr, u_short *addrs, int addrs_len)
   ns_rr rr;
   int i, ix = 0, offs;
 
-  init_chaos_dns_state(statp);
+  init_chaos_dns_state();
 
   sprintf(qstring,"%s.", namestr);
 
-  if ((anslen = res_nquery(statp, qstring, ns_c_chaos, ns_t_a, (u_char *)&answer, sizeof(answer))) < 0) {
+  if ((anslen = res_query(qstring, ns_c_chaos, ns_t_a, (u_char *)&answer, sizeof(answer))) < 0) {
     if (trace_dns) {
-      fprintf(stderr,"DNS: addrs of %s failed, errcode %d: %s\n", qstring, statp->res_h_errno, hstrerror(statp->res_h_errno));
+      fprintf(stderr,"DNS: addrs of %s failed, errcode %d: %s\n", qstring, _res->res_h_errno, hstrerror(_res->res_h_errno));
     }
     return -1;
   }
@@ -419,7 +416,7 @@ dns_addrs_of_name(u_char *namestr, u_short *addrs, int addrs_len)
   }
 
   if (ns_initparse((u_char *)&answer, anslen, &m) < 0) {
-    fprintf(stderr,"ns_init_parse failure code %d",statp->res_h_errno);
+    fprintf(stderr,"ns_init_parse failure code %d",_res->res_h_errno);
     return -1;
   }
 
@@ -458,25 +455,25 @@ dns_addrs_of_name(u_char *namestr, u_short *addrs, int addrs_len)
   return ix;
 }
 static void 
-init_chaos_dns_state(res_state statp) 
+init_chaos_dns_state(void) 
 {
   // initialize resolver library
-  if (res_ninit(statp) < 0) {
+  if (res_init() < 0) {
     fprintf(stderr,"Can't init statp\n");
     exit(1);
   }
   // make sure to make recursive requests
-  statp->options |= RES_RECURSE;
+  _res.options |= RES_RECURSE;
   // change nameserver
-  if (inet_aton(chaos_dns_server, &statp->nsaddr_list[0].sin_addr) < 0) {
+  if (inet_aton(chaos_dns_server, &_res.nsaddr_list[0].sin_addr) < 0) {
     perror("inet_aton (chaos_dns_server does not parse)");
     exit(1);
   } else {
-    statp->nsaddr_list[0].sin_family = AF_INET;
-    statp->nsaddr_list[0].sin_port = htons(53);
-    statp->nscount = 1;
+    _res.nsaddr_list[0].sin_family = AF_INET;
+    _res.nsaddr_list[0].sin_port = htons(53);
+    _res.nscount = 1;
   }
-  // what about the timeout? RES_TIMEOUT=5s, statp->retrans (RES_MAXRETRANS=30 s? ms?), ->retry (RES_DFLRETRY=2, _MAXRETRY=5)
+  // what about the timeout? RES_TIMEOUT=5s, _res->retrans (RES_MAXRETRANS=30 s? ms?), ->retry (RES_DFLRETRY=2, _MAXRETRY=5)
 }
 
 void
@@ -566,14 +563,13 @@ print_config_dns()
 {
   // resolver state, local to each thread
   struct __res_state chres;
-  res_state statp = &chres;
-  init_chaos_dns_state(statp);
+  init_chaos_dns_state();
 
   printf("DNS config:\n Chaos DNS forwarder %s\n Chaos address domain %s\n DNS tracing %s\n",
 	 chaos_dns_server, chaos_address_domain, trace_dns ? "on" : "off");
   if (trace_dns) {
-    printf(" DNS options %#lx, nsaddrs %d, family %d, port %d", statp->options, statp->nscount, statp->nsaddr_list[0].sin_family, ntohs(statp->nsaddr_list[0].sin_port));
-    printf(", addr %s\n", inet_ntoa(statp->nsaddr_list[0].sin_addr));
+    printf(" DNS options %#lx, nsaddrs %d, family %d, port %d", _res->options, _res->nscount, _res->nsaddr_list[0].sin_family, ntohs(_res->nsaddr_list[0].sin_port));
+    printf(", addr %s\n", inet_ntoa(_res->nsaddr_list[0].sin_addr));
   }
 
   int i, n;
@@ -688,15 +684,13 @@ static void
 dns_describe_packet(u_char *pkt, int len)
 {
   // resolver state, local to each thread
-  struct __res_state chres;
-  res_state statp = &chres;
   ns_msg m;
   ns_rr rr;
 
   init_chaos_dns_state(statp);
 
   if (ns_initparse(pkt, len, &m) < 0) {
-    fprintf(stderr,"ns_initparse failure code %d: %s\n",statp->res_h_errno, hstrerror(statp->res_h_errno));
+    fprintf(stderr,"ns_initparse failure code %d: %s\n",_res->res_h_errno, hstrerror(_res->res_h_errno));
     if (debug) dumppkt_raw(pkt, len);
     return;
   }
